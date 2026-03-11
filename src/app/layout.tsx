@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import { Space_Grotesk } from "next/font/google";
+import { Inter } from "next/font/google";
 import "./globals.css";
 
-const font = Space_Grotesk({ subsets: ["latin"], weight: ["300", "400", "500", "600", "700"] });
+const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Nia iMessage",
@@ -16,7 +16,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
-      <body className={`${font.className} bg-black text-white antialiased`}>
+      <body className={`${inter.className} bg-neutral-950 text-white antialiased`}>
         {children}
       </body>
     </html>

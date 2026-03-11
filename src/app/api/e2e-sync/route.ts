@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { getNia } from "@/lib/nia";
 import { readMessages, buildContactLookup } from "@/lib/imessage";
-import { buildLocalIMessageSyncBatch, buildE2ESyncBatch } from "nia-ai-ts";
-import type { LocalIMessageRow, E2EChunkInput } from "nia-ai-ts";
-import { getE2EKeys } from "@/lib/e2e-keys";
+import { buildEncryptedBatch } from "@/lib/encryption";
+import { buildLocalIMessageSyncBatch } from "nia-ai-ts";
+import type { LocalIMessageRow } from "nia-ai-ts";
 
 export async function POST(request: Request) {
   try {
@@ -33,37 +33,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No conversation chunks built" }, { status: 400 });
     }
 
-    const { encKey, blindKey } = await getE2EKeys();
+    const e2eBatch = await buildEncryptedBatch(
+      batch.files.map((f) => ({
+        content: f.content,
+        metadata: f.metadata as unknown as Record<string, unknown>,
+        contactId: f.metadata.contactId,
+        conversationId: f.metadata.conversationId,
+        timestamp: f.metadata.timestamp,
+        senderRole: f.metadata.senderRole,
+      }))
+    );
 
     const nia = getNia();
-
-    const embedder = {
-      embedDocuments: async (texts: string[]) => {
-        const result = await nia.daemon.embed(texts, "document");
-        return result.embeddings;
-      },
-      embedQuery: async (text: string) => {
-        const result = await nia.daemon.embed([text], "query");
-        return result.embeddings[0]!;
-      },
-    };
-
-    const chunkInputs: E2EChunkInput[] = batch.files.map((f, i) => ({
-      chunkId: `e2e_imsg_${i}_${Date.now()}`,
-      content: f.content,
-      contactId: f.metadata.contactId,
-      conversationId: f.metadata.conversationId,
-      dayBucket: f.metadata.timestamp?.slice(0, 10),
-      senderRole: f.metadata.senderRole,
-      metadata: f.metadata as unknown as Record<string, unknown>,
-    }));
-
-    const e2eBatch = await buildE2ESyncBatch({
-      chunks: chunkInputs,
-      encryptionKey: encKey,
-      blindIndexKey: blindKey,
-      embedder,
-    });
 
     const sources = await nia.daemon.listSources();
     const existing = sources.find(
@@ -76,7 +57,7 @@ export async function POST(request: Request) {
     } else {
       const created = await nia.daemon.createSource({
         path: process.env.CHAT_DB_PATH || "~/Library/Messages/chat.db",
-        displayName: "iMessage E2E App",
+        displayName: "iMessage E2E",
         detectedType: "imessage",
       });
       localFolderId = created.localFolderId;
@@ -99,7 +80,7 @@ export async function POST(request: Request) {
       contactsResolved: Object.keys(contactLookup).length,
       blindIndexTokens: e2eBatch.stats.totalTokens,
       sourceId: localFolderId,
-      mode: "e2e",
+      encrypted: true,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
