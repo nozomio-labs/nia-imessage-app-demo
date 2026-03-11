@@ -15,9 +15,11 @@ interface StatusData {
 
 interface SearchResult {
   answer: string | null;
-  sources: Array<{ content: string; metadata: Record<string, unknown>; encrypted?: boolean }>;
+  sources: Array<{ content: string; metadata: Record<string, unknown>; encrypted?: boolean; decryptedLocally?: boolean }>;
   session?: { id: string; chunksUsed: number; chunksRemaining: number; status: string };
   encrypted?: boolean;
+  decryptedLocally?: boolean;
+  chunksDecrypted?: number;
 }
 
 interface SyncResult {
@@ -267,13 +269,19 @@ export default function Home() {
           <div className="space-y-6 animate-fade-in">
             {/* E2E Session Badge */}
             {result.session && (
-              <div className="flex items-center gap-2 text-xs text-violet-400/70">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-violet-400/70">
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                 </svg>
-                Decrypt session {result.session.id.slice(0, 16)}...
+                Session {result.session.id.slice(0, 16)}...
                 <span className="text-neutral-600">|</span>
-                {result.session.chunksUsed} chunks used, {result.session.chunksRemaining} remaining
+                {result.session.chunksUsed} chunks retrieved
+                {result.decryptedLocally && (
+                  <>
+                    <span className="text-neutral-600">|</span>
+                    <span className="text-emerald-400">{result.chunksDecrypted} decrypted on device</span>
+                  </>
+                )}
               </div>
             )}
 
@@ -286,7 +294,11 @@ export default function Home() {
                 <div className={`text-xs font-medium uppercase tracking-wider mb-3 ${
                   mode === "e2e" ? "text-violet-400" : "text-emerald-400"
                 }`}>
-                  {mode === "e2e" ? "Answer (via encrypted search)" : "Answer"}
+                  {mode === "e2e"
+                    ? result.decryptedLocally
+                      ? "Answer (encrypted on cloud, decrypted on device)"
+                      : "Answer (via encrypted search)"
+                    : "Answer"}
                 </div>
                 <div className="text-neutral-200 leading-relaxed whitespace-pre-wrap">
                   {result.answer}
@@ -314,7 +326,12 @@ export default function Home() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                         Source {i + 1}
-                        {source.encrypted && (
+                        {source.decryptedLocally && (
+                          <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] bg-emerald-800/30 text-emerald-400 font-medium">
+                            DECRYPTED ON DEVICE
+                          </span>
+                        )}
+                        {source.encrypted && !source.decryptedLocally && (
                           <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] bg-violet-800/30 text-violet-400 font-medium">
                             ENCRYPTED
                           </span>
