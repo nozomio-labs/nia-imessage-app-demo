@@ -9,6 +9,16 @@ import { getNia } from "./nia";
 
 const PASSPHRASE = process.env.E2E_PASSPHRASE || "nia-imessage-demo-e2e-2026";
 
+function deterministicSalt(passphrase: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(`nia-e2e-salt:${passphrase}`);
+  const salt = new Uint8Array(16);
+  for (let i = 0; i < data.length; i++) {
+    salt[i % 16] ^= data[i]!;
+  }
+  return salt;
+}
+
 let cachedKeys: {
   encKey: CryptoKey;
   blindKey: CryptoKey;
@@ -17,7 +27,8 @@ let cachedKeys: {
 
 export async function getKeys() {
   if (cachedKeys) return cachedKeys;
-  const { key: encKey, salt } = await deriveKeyFromPassphrase(PASSPHRASE);
+  const salt = deterministicSalt(PASSPHRASE);
+  const { key: encKey } = await deriveKeyFromPassphrase(PASSPHRASE, salt);
   const blindKey = await deriveBlindIndexKey(PASSPHRASE, salt);
   cachedKeys = { encKey, blindKey, salt };
   return cachedKeys;
