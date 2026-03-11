@@ -74,18 +74,38 @@ export async function POST(request: Request) {
       });
     }
 
-    // Single LLM call with decrypted context injected
-    const context = decrypted.map((c, i) => `[Message ${i + 1}]\n${c}`).join("\n\n");
-    const result = (await nia.search.query({
-      messages: [
-        { role: "user", content: `Answer based on these iMessage conversations:\n\n${context}\n\nQuestion: ${body.query}` },
-      ],
-      skip_llm: false,
-      fast_mode: true,
-      include_sources: false,
-    })) as Record<string, unknown>;
+    // Call Anthropic directly for synthesis (decrypted content never touches Nia cloud)
+    const context = decrypted.map((c, i) => `[Message ${i + 1}]\n${c}`).join("\n\n---\n\n");
+    const prompt = `You are an AI assistant helping a user search their iMessage conversations. Based on the following message excerpts, answer the user's question concisely.\n\nConversation excerpts:\n${context}\n\nUser's question: ${body.query}`;
 
-    const answer = typeof result.content === "string" ? result.content : "Could not generate answer.";
+    const llmResponse = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY || "",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    let answer: string;
+    if (llmResponse.ok) {
+      const llmData = (await llmResponse.json()) as { content?: Array<{ text?: string }> };
+      answer = llmData.content?.[0]?.text || "Could not generate answer.";
+    } else {
+      // Fallback: use Nia search with context
+      const result = (await nia.search.query({
+        messages: [{ role: "user", content: `${prompt}` }],
+        skip_llm: false,
+        fast_mode: false,
+        include_sources: false,
+      })) as Record<string, unknown>;
+      answer = typeof result.content === "string" ? result.content : "Could not generate answer.";
+    }
     const sessionStatus = await nia.daemon.getE2ESessionStatus(session.sessionId);
 
     return NextResponse.json({
