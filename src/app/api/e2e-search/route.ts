@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { getNia } from "@/lib/nia";
-import { deriveKeyFromPassphrase, decryptFromBase64 } from "nia-ai-ts";
-
-const E2E_PASSPHRASE = process.env.E2E_PASSPHRASE || "nia-imessage-demo-e2e-2026";
+import { decryptFromBase64 } from "nia-ai-ts";
+import { getE2EKeys } from "@/lib/e2e-keys";
 
 export async function POST(request: Request) {
   try {
@@ -55,7 +54,7 @@ export async function POST(request: Request) {
 
     // Fetch ciphertext + decrypt locally
     const decryptResult = await nia.daemon.decryptE2EChunks(session.sessionId, chunkIds.slice(0, 10));
-    const { key } = await deriveKeyFromPassphrase(E2E_PASSPHRASE);
+    const { encKey: key } = await getE2EKeys();
 
     const decrypted: string[] = [];
     for (const chunk of decryptResult.chunks) {

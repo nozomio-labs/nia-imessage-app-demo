@@ -1,15 +1,9 @@
 import { NextResponse } from "next/server";
 import { getNia } from "@/lib/nia";
 import { readMessages, buildContactLookup } from "@/lib/imessage";
-import {
-  buildLocalIMessageSyncBatch,
-  buildE2ESyncBatch,
-  deriveKeyFromPassphrase,
-  deriveBlindIndexKey,
-} from "nia-ai-ts";
+import { buildLocalIMessageSyncBatch, buildE2ESyncBatch } from "nia-ai-ts";
 import type { LocalIMessageRow, E2EChunkInput } from "nia-ai-ts";
-
-const E2E_PASSPHRASE = process.env.E2E_PASSPHRASE || "nia-imessage-demo-e2e-2026";
+import { getE2EKeys } from "@/lib/e2e-keys";
 
 export async function POST(request: Request) {
   try {
@@ -39,8 +33,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No conversation chunks built" }, { status: 400 });
     }
 
-    const { key: encKey, salt } = await deriveKeyFromPassphrase(E2E_PASSPHRASE);
-    const blindKey = await deriveBlindIndexKey(E2E_PASSPHRASE, salt);
+    const { encKey, blindKey } = await getE2EKeys();
 
     const nia = getNia();
 
