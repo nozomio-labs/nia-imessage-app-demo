@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
 import { getNia } from "@/lib/nia";
-import {
-  deriveKeyFromPassphrase,
-  decryptFromBase64,
-} from "nia-ai-ts";
+import { deriveKeyFromPassphrase, decryptFromBase64 } from "nia-ai-ts";
 
 const E2E_PASSPHRASE = process.env.E2E_PASSPHRASE || "nia-imessage-demo-e2e-2026";
 
@@ -20,12 +17,8 @@ export async function POST(request: Request) {
     const source = sources.find(
       (s) => s.detectedType === "imessage" && s.displayName?.includes("iMessage E2E")
     );
-
     if (!source) {
-      return NextResponse.json(
-        { error: "No E2E iMessage source found. Sync with E2E mode first." },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "No E2E source. Sync first." }, { status: 404 });
     }
 
     const session = await nia.daemon.createE2ESession({
@@ -34,7 +27,7 @@ export async function POST(request: Request) {
       maxChunks: 50,
     });
 
-    // Step 1: Vector search finds relevant encrypted chunks
+    // Vector search (skip LLM, just get chunk refs)
     const searchResult = (await nia.search.query({
       messages: [{ role: "user", content: body.query }],
       local_folders: [source.localFolderId],
@@ -44,8 +37,6 @@ export async function POST(request: Request) {
     })) as Record<string, unknown>;
 
     const rawSources = Array.isArray(searchResult.sources) ? searchResult.sources : [];
-
-    // Step 2: Extract chunk IDs from search results and fetch ciphertext
     const chunkIds: string[] = [];
     for (const s of rawSources) {
       const meta = (s as Record<string, unknown>).metadata as Record<string, unknown> | undefined;
@@ -53,77 +44,58 @@ export async function POST(request: Request) {
       if (ref) chunkIds.push(ref);
     }
 
-    let decryptedContexts: string[] = [];
+    if (!chunkIds.length) {
+      return NextResponse.json({
+        answer: "No relevant messages found for that query.",
+        sources: [],
+        session: { id: session.sessionId, chunksUsed: 0, chunksRemaining: 50 },
+        mode: "e2e",
+      });
+    }
 
-    if (chunkIds.length > 0) {
-      const decryptResult = await nia.daemon.decryptE2EChunks(
-        session.sessionId,
-        chunkIds.slice(0, 10),
-      );
+    // Fetch ciphertext + decrypt locally
+    const decryptResult = await nia.daemon.decryptE2EChunks(session.sessionId, chunkIds.slice(0, 10));
+    const { key } = await deriveKeyFromPassphrase(E2E_PASSPHRASE);
 
-      // Step 3: Decrypt ciphertext locally with our key
-      const { key } = await deriveKeyFromPassphrase(E2E_PASSPHRASE);
-
-      for (const chunk of decryptResult.chunks) {
-        try {
-          const plaintext = await decryptFromBase64(chunk.plaintext, key);
-          decryptedContexts.push(plaintext);
-        } catch {
-          // chunk may use a different key or format
-          decryptedContexts.push(chunk.plaintext.slice(0, 200));
-        }
+    const decrypted: string[] = [];
+    for (const chunk of decryptResult.chunks) {
+      try {
+        decrypted.push(await decryptFromBase64(chunk.plaintext, key));
+      } catch {
+        // skip unreadable chunks
       }
     }
 
-    // Step 4: If we decrypted content, synthesize an answer with context
-    let answer: string | null = null;
-
-    if (decryptedContexts.length > 0) {
-      const contextBlock = decryptedContexts
-        .map((c, i) => `[Source ${i + 1}]\n${c}`)
-        .join("\n\n---\n\n");
-
-      const synthesisResult = (await nia.search.query({
-        messages: [
-          {
-            role: "user",
-            content: `Based on the following iMessage conversation excerpts, answer this question: ${body.query}\n\n${contextBlock}`,
-          },
-        ],
-        skip_llm: false,
-        fast_mode: false,
-        include_sources: false,
-      })) as Record<string, unknown>;
-
-      answer = typeof synthesisResult.content === "string" ? synthesisResult.content : null;
+    if (!decrypted.length) {
+      return NextResponse.json({
+        answer: "Found encrypted chunks but couldn't decrypt. Check passphrase.",
+        sources: [],
+        session: { id: session.sessionId, chunksUsed: decryptResult.chunks.length, chunksRemaining: decryptResult.chunksRemaining },
+        mode: "e2e",
+      });
     }
 
-    // Fallback: try regular search if no chunks decrypted
-    if (!answer && decryptedContexts.length === 0) {
-      const fallback = (await nia.search.query({
-        messages: [{ role: "user", content: body.query }],
-        local_folders: [source.localFolderId],
-        skip_llm: false,
-        fast_mode: false,
-        include_sources: true,
-        e2e_session_id: session.sessionId,
-      })) as Record<string, unknown>;
+    // Single LLM call with decrypted context injected
+    const context = decrypted.map((c, i) => `[Message ${i + 1}]\n${c}`).join("\n\n");
+    const result = (await nia.search.query({
+      messages: [
+        { role: "user", content: `Answer based on these iMessage conversations:\n\n${context}\n\nQuestion: ${body.query}` },
+      ],
+      skip_llm: false,
+      fast_mode: true,
+      include_sources: false,
+    })) as Record<string, unknown>;
 
-      answer = typeof fallback.content === "string" ? fallback.content : null;
-    }
-
-    const snippets = decryptedContexts.slice(0, 10).map((content, i) => ({
-      content: content.slice(0, 500),
-      metadata: { source_index: i + 1 },
-      encrypted: false,
-      decrypted: true,
-    }));
-
+    const answer = typeof result.content === "string" ? result.content : "Could not generate answer.";
     const sessionStatus = await nia.daemon.getE2ESessionStatus(session.sessionId);
 
     return NextResponse.json({
       answer,
-      sources: snippets,
+      sources: decrypted.slice(0, 10).map((c, i) => ({
+        content: c.slice(0, 500),
+        metadata: { source_index: i + 1 },
+        decrypted: true,
+      })),
       session: {
         id: session.sessionId,
         chunksUsed: sessionStatus.chunksUsed,
