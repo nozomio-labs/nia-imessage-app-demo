@@ -24,14 +24,13 @@ export async function POST(request: Request) {
       );
     }
 
-    // Step 1: Create a decrypt session to retrieve encrypted chunks
     const session = await nia.daemon.createE2ESession({
       localFolderId: source.localFolderId,
       ttlSeconds: 300,
       maxChunks: 50,
     });
 
-    // Step 2: Vector search finds relevant chunks (embeddings are in the clear)
+    // Step 1: Vector search to find relevant encrypted chunks (skip LLM)
     const searchResult = (await nia.search.query({
       messages: [{ role: "user", content: body.query }],
       local_folders: [source.localFolderId],
@@ -42,7 +41,7 @@ export async function POST(request: Request) {
 
     const rawSources = Array.isArray(searchResult.sources) ? searchResult.sources : [];
 
-    // Step 3: Extract chunk IDs from search results and fetch ciphertext
+    // Step 2: Extract chunk IDs from vector search results
     const chunkIds: string[] = [];
     for (const s of rawSources) {
       const meta = (s as Record<string, unknown>).metadata as Record<string, unknown> | undefined;
@@ -50,63 +49,75 @@ export async function POST(request: Request) {
       if (ref) chunkIds.push(ref);
     }
 
-    let decryptedContexts: string[] = [];
+    if (!chunkIds.length) {
+      return NextResponse.json({
+        answer: "No relevant messages found for your query.",
+        sources: [],
+        encrypted: true,
+      });
+    }
 
-    if (chunkIds.length > 0) {
-      // Step 4: Retrieve ciphertext through the session
-      const decryptResult = await nia.daemon.decryptE2EChunks(
-        session.sessionId,
-        chunkIds.slice(0, 20),
-      );
+    // Step 3: Fetch ciphertext through session
+    const decryptResult = await nia.daemon.decryptE2EChunks(
+      session.sessionId,
+      chunkIds.slice(0, 15),
+    );
 
-      // Step 5: DECRYPT LOCALLY -- this app holds the key, Nia cloud never sees plaintext
-      const { encKey } = await getKeys();
+    // Step 4: DECRYPT LOCALLY with the key this app holds
+    const { encKey } = await getKeys();
+    const decryptedTexts: string[] = [];
 
-      for (const chunk of decryptResult.chunks) {
-        try {
-          const plaintext = await decryptFromBase64(chunk.plaintext, encKey);
-          decryptedContexts.push(plaintext);
-        } catch {
-          decryptedContexts.push("[decryption failed]");
-        }
+    for (const chunk of decryptResult.chunks) {
+      try {
+        const plaintext = await decryptFromBase64(chunk.plaintext, encKey);
+        decryptedTexts.push(plaintext);
+      } catch {
+        // skip chunks that can't be decrypted (old salt)
       }
     }
 
-    // Step 6: Send decrypted plaintext to LLM for synthesis
-    // The LLM now sees real content -- but Nia cloud never did
-    let answer: string | null = null;
-
-    if (decryptedContexts.length > 0) {
-      const contextBlock = decryptedContexts
-        .map((c, i) => `[Source ${i + 1}]\n${c}`)
-        .join("\n\n---\n\n");
-
-      const synthesisResult = (await nia.search.query({
-        messages: [
-          {
-            role: "user",
-            content: `Based on these message excerpts, answer: ${body.query}\n\n${contextBlock}`,
-          },
-        ],
-        skip_llm: false,
-        fast_mode: false,
-        include_sources: false,
-      })) as Record<string, unknown>;
-
-      answer = typeof synthesisResult.content === "string" ? synthesisResult.content : null;
+    if (!decryptedTexts.length) {
+      return NextResponse.json({
+        answer: "Found encrypted chunks but decryption failed. You may need to re-sync with 'Encrypt & Sync' to use the current encryption key.",
+        sources: [],
+        encrypted: true,
+        decryptionFailed: true,
+      });
     }
+
+    // Step 5: Send decrypted content to LLM for synthesis
+    // Use the search endpoint with the context embedded in the system message
+    const contextBlock = decryptedTexts
+      .map((c, i) => `--- Message excerpt ${i + 1} ---\n${c}`)
+      .join("\n\n");
+
+    const synthesisResult = (await nia.search.query({
+      messages: [
+        {
+          role: "system",
+          content: `You are answering questions about the user's personal iMessage conversations. Here are relevant message excerpts:\n\n${contextBlock}`,
+        },
+        { role: "user", content: body.query },
+      ],
+      local_folders: [source.localFolderId],
+      skip_llm: false,
+      fast_mode: false,
+      include_sources: false,
+    })) as Record<string, unknown>;
+
+    const answer = typeof synthesisResult.content === "string"
+      ? synthesisResult.content
+      : "Could not generate an answer.";
 
     const sessionStatus = await nia.daemon.getE2ESessionStatus(session.sessionId);
 
-    const snippets = decryptedContexts.map((content, i) => ({
-      content: content.slice(0, 500),
-      metadata: {},
-      decryptedLocally: true,
-    }));
-
     return NextResponse.json({
-      answer: answer || "No relevant messages found for your query.",
-      sources: snippets,
+      answer,
+      sources: decryptedTexts.map((content) => ({
+        content: content.slice(0, 500),
+        metadata: {},
+        decryptedLocally: true,
+      })),
       session: {
         id: session.sessionId,
         chunksUsed: sessionStatus.chunksUsed,
@@ -115,7 +126,7 @@ export async function POST(request: Request) {
       },
       encrypted: true,
       decryptedLocally: true,
-      chunksDecrypted: decryptedContexts.length,
+      chunksDecrypted: decryptedTexts.length,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
